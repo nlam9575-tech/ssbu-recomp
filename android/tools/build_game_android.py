@@ -1,8 +1,8 @@
-"""Builds the game folder of the Android port on a Mac or Linux PC, from your own dump (BUILDING.md: tools/extract/dump_folder.py):
+"""Builds the game folder of the Android port on Windows, from your own dump (BUILDING.md: tools/extract/dump_folder.py):
 
-    python3 android/tools/build_game_android.py --dump <folder> [--build <folder>] [--jobs N] [--modules all|a,b]
-                                                [--redo <step> | --from <step> | --only <step>] [--push [--serial <adb serial>]]
-                                                [--package [<file.zip>]]
+    python android/tools/build_game_android.py --dump <folder> [--build <folder>] [--jobs N] [--modules all|a,b]
+                                               [--redo <step> | --from <step> | --only <step>] [--push [--serial <adb serial>]]
+                                               [--package [<file.zip>]]
 
 The steps of scripts/setup.py that derive files from the dump run as they are there (stage, convert, modules, tables, lift,
 sdk); compile and nro build the game libraries with the NDK's clang for arm64 (tools/lifter/build.py RECOMP_TARGET=android):
@@ -16,11 +16,10 @@ parts of 512 MB, appended on the device one by one, so an interrupted push resum
 game folder that needs a PC. Copy it to the device and import it in the launcher ("Import libraries (.zip)"); the launcher
 makes everything else there from your Switch files (keys, base game, update, DLC). The .zip holds your recompiled game: it
 is for your own devices, do not share it.
-Needs: python 3.10+ with requirements.txt, the Android NDK (NDK, else $ANDROID_HOME/ndk/29.0.14206865) and, for --push, adb.
+Needs: python 3.10+ with requirements.txt, the Android NDK (NDK, else %ANDROID_HOME%/ndk/30.0.16248370 or %ANDROID_HOME%/ndk/android-ndk-r30) and, for --push, adb.
 """
 import argparse
 import os
-import shlex
 import subprocess
 import sys
 import time
@@ -30,24 +29,85 @@ sys.path.insert(0, os.path.join(REPO, 'scripts'))
 import setup as S  # noqa: E402
 
 STEPS = ['deps', 'stage', 'convert', 'modules', 'tables', 'lift', 'sdk', 'compile', 'nro']
-SDK = os.environ.get('ANDROID_HOME', os.path.expanduser('~/Library/Android/sdk'))
-NDK = os.environ.get('NDK', os.path.join(SDK, 'ndk', '29.0.14206865'))
-HOST = 'darwin-x86_64' if sys.platform == 'darwin' else 'linux-x86_64'
+
+# Default SDK path for Windows / macOS / Linux
+if sys.platform == 'win32':
+    DEFAULT_SDK = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'Android', 'Sdk')
+    HOST = 'windows-x86_64'
+elif sys.platform == 'darwin':
+    DEFAULT_SDK = os.path.expanduser('~/Library/Android/sdk')
+    HOST = 'darwin-x86_64'
+else:
+    DEFAULT_SDK = os.path.expanduser('~/Android/Sdk')
+    HOST = 'linux-x86_64'
+
+SDK = os.environ.get('ANDROID_HOME', DEFAULT_SDK)
+
+# Look for standard NDK root paths (supports both extracted archive folder 'android-ndk-r30' and SDK component '30.0.16248370')
+_default_r30_zip_ndk = os.path.join(SDK, 'ndk', 'android-ndk-r30')
+_default_sdk_r30_ndk = os.path.join(SDK, 'ndk', '30.0.16248370')
+_resolved_ndk = _default_r30_zip_ndk if os.path.isdir(_default_r30_zip_ndk) else _default_sdk_r30_ndk
+
+NDK = os.environ.get('NDK', _resolved_ndk)
 PART = 512 << 20
+TARGET_TRIPLE = 'aarch64-linux-android35'
+
+
+def adb_quote(path):
+    """Quotes a remote path safely for the Android adb shell."""
+    return "'" + path.replace("'", "'\\''") + "'"
 
 
 def android_env(cx):
-    # RECOMP_INLINE: the guest load / store / flag / NEON helpers inlined into the game code (as the Linux and macOS builds
-    # of scripts/setup.py; build_opt.py falls back per file when an inlined compile takes too long)
-    return cx.env(RECOMP_TARGET='android', RECOMP_CLANG=cx.tools['clang'], RECOMP_GEN='gen_eh_o2', RECOMP_OBJ='obj_eh_o1',
-                  RECOMP_DLL='ssbu_game_eh_o1.dll', RECOMP_NRO_SUFFIX='_eh_o2', RECOMP_INLINE='1')
+    env_vars = dict(
+        RECOMP_TARGET='android',
+        RECOMP_TARGET_TRIPLE=TARGET_TRIPLE,
+        RECOMP_CLANG=cx.tools['clang'],
+        RECOMP_GEN='gen_eh_o2',
+        RECOMP_OBJ='obj_eh_o1',
+        RECOMP_DLL='ssbu_game_eh_o1.dll',
+        RECOMP_NRO_SUFFIX='_eh_o2',
+        RECOMP_INLINE='1'
+    )
+
+    if 'sysroot' in cx.tools:
+        env_vars['RECOMP_SYSROOT'] = cx.tools['sysroot']
+        inc_common = os.path.join(cx.tools['sysroot'], 'usr', 'include')
+        inc_arch = os.path.join(cx.tools['sysroot'], 'usr', 'include', 'aarch64-linux-android')
+        inc_path = os.pathsep.join([inc_common, inc_arch]) if os.path.isdir(inc_arch) else inc_common
+        env_vars['C_INCLUDE_PATH'] = inc_path
+        env_vars['CPATH'] = inc_path
+
+    return cx.env(**env_vars)
 
 
 def step_deps(cx):
-    clang = os.path.join(NDK, 'toolchains', 'llvm', 'prebuilt', HOST, 'bin', 'clang')
+    clang_exe = 'clang.exe' if sys.platform == 'win32' else 'clang'
+    llvm_dir = os.path.join(NDK, 'toolchains', 'llvm', 'prebuilt', HOST)
+    clang = os.path.join(llvm_dir, 'bin', clang_exe)
     if not os.path.isfile(clang):
-        raise S.Fail('the NDK\'s clang was not found at %s (NDK=<ndk folder>)' % clang)
-    cx.tools['clang'] = clang
+        raise S.Fail("the NDK's clang was not found at %s (NDK=<ndk folder>)" % clang)
+
+    sysroot = os.path.join(llvm_dir, 'sysroot')
+    if os.path.isdir(sysroot):
+        cx.tools['sysroot'] = sysroot
+
+    # Generate a wrapper that injects target triple, -fPIC, -fdeclspec, and sysroot
+    os.makedirs(cx.build, exist_ok=True)
+    if sys.platform == 'win32':
+        wrapper = os.path.join(cx.build, 'clang_android_wrapper.cmd')
+        with open(wrapper, 'w', encoding='utf-8') as f:
+            f.write('@echo off\n')
+            f.write('"%s" --target=%s -fPIC -fdeclspec --sysroot="%s" %%*\n' % (clang, TARGET_TRIPLE, sysroot))
+    else:
+        wrapper = os.path.join(cx.build, 'clang_android_wrapper.sh')
+        with open(wrapper, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\n')
+            f.write('exec "%s" --target=%s -fPIC -fdeclspec --sysroot="%s" "$@"\n' % (clang, TARGET_TRIPLE, sysroot))
+        os.chmod(wrapper, 0o755)
+
+    cx.tools['clang'] = wrapper
+
     S.say('  clang: %s' % subprocess.run([clang, '--version'], capture_output=True, text=True).stdout.splitlines()[0])
     S.dump_checks(cx, cx.a)
 
@@ -123,7 +183,7 @@ def push(cx, serial, dest):
         return subprocess.run(adb + ['shell', cmd], capture_output=True, text=True).stdout.strip()
 
     def remote_size(path):
-        s = sh('stat -c %%s %s 2>/dev/null' % shlex.quote(path))
+        s = sh('stat -c %%s %s 2>/dev/null' % adb_quote(path))
         return int(s) if s.isdigit() else -1
 
     files = push_list(cx)
@@ -131,21 +191,21 @@ def push(cx, serial, dest):
     S.say('push: %d files, %.1f GB -> %s' % (len(files), total / 2 ** 30, dest))
     t0, sent = time.time(), 0
     for local, rel in files:
-        size, remote = os.path.getsize(local), dest + '/' + rel
+        size, remote = os.path.getsize(local), dest + '/' + rel.replace('\\', '/')
         have = remote_size(remote)
         if have == size and not rel.endswith(('.dll', '.json')):      # (libraries and state.json change between builds)
             continue
-        sh('mkdir -p %s' % shlex.quote(os.path.dirname(remote)))
+        remote_dir = os.path.dirname(remote).replace('\\', '/')
+        sh('mkdir -p %s' % adb_quote(remote_dir))
         if size <= PART:
             r = subprocess.run(adb + ['push', local, remote], capture_output=True, text=True)
             if r.returncode:
                 raise S.Fail('adb push %s failed: %s' % (rel, (r.stdout + r.stderr)[-500:]))
             sent += size
             continue
-        # a large file (data.arc): parts appended on the device; what is there already (a whole number of parts) stays
         done = have if 0 <= have < size and have % PART == 0 else 0
         if not done:
-            sh('rm -f %s' % shlex.quote(remote))
+            sh('rm -f %s' % adb_quote(remote))
         part = os.path.join(cx.build, 'push_part.bin')
         with open(local, 'rb') as f:
             f.seek(done)
@@ -155,7 +215,7 @@ def push(cx, serial, dest):
                 r = subprocess.run(adb + ['push', part, remote + '.part'], capture_output=True, text=True)
                 if r.returncode:
                     raise S.Fail('adb push of %s at %d failed: %s' % (rel, done, (r.stdout + r.stderr)[-500:]))
-                sh('cat %s >> %s && rm %s' % (shlex.quote(remote + '.part'), shlex.quote(remote), shlex.quote(remote + '.part')))
+                sh('cat %s >> %s && rm %s' % (adb_quote(remote + '.part'), adb_quote(remote), adb_quote(remote + '.part')))
                 done += os.path.getsize(part)
                 sent += os.path.getsize(part)
                 if remote_size(remote) != done:
@@ -204,7 +264,7 @@ def main():
         if s in done and s not in force and s not in ('deps', 'stage'):
             S.say('[%d/%d] %s: done earlier (%s), skipped' % (i + 1, len(STEPS), s, S.fmt(done[s]['secs'])))
             continue
-        if s == 'deps' and not (a.dump or a.exefs):             # a later run: the dump of state.json
+        if s == 'deps' and not (a.dump or a.exefs):
             d = cx.state['dump']
             a.exefs, a.romfs, a.sysdata = d['exefs'], d['romfs'], d.get('sysdata')
         S.say('[%d/%d] %s ...' % (i + 1, len(STEPS), s))
