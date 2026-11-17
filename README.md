@@ -34,7 +34,7 @@ The PC version (Windows and Linux), its installer and the modding work are in th
   The stock Adreno driver lacks features the renderer needs.
 - Your own Switch files: `prod.keys` (and `title.keys`), the base game `.nsp`, the update `.nsp` (13.0.4 or 13.0.5), and
   optionally your add-on content (DLC) `.nsp` files and your save data.
-- **Once, a PC** (Mac or Linux) with the Android NDK, to make the game libraries (step 1 below). This cannot be done on
+- **Once, a PC** (Windows) with the Android NDK, to make the game libraries (step 1 below). This cannot be done on
   the phone.
 
 Tested on a **Poco F5** (Snapdragon 7+ Gen 2, Adreno 725, Mesa Turnip): title, menus and battles, **59-60 fps in a fight**
